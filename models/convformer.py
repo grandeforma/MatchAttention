@@ -5,7 +5,8 @@ import torch.nn.functional as F
 
 from timm.models.layers import trunc_normal_, DropPath
 from timm.models.registry import register_model
-from timm.models.layers.helpers import to_2tuple
+from timm.layers import to_2tuple
+
 class LayerNormGeneral(nn.Module):
     r""" General LayerNorm for different situations.
 
