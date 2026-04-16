@@ -11,6 +11,8 @@ from dataloader.stereo import transforms
 from utils.utils import InputPadder, calc_noc_mask
 from utils.file_io import write_pfm
 from models.match_stereo import MatchStereo
+import gc
+
 
 torch.backends.cudnn.benchmark = True
 
@@ -59,6 +61,10 @@ class Stereo2Depth:
         scale = self.scale
         dtype = self.dtype
         model = self.model
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
 
         """Run MatchStereo/MatchFlow on stereo/flow pairs"""
         val_transform_list = [transforms.Resize(scale_x=scale, scale_y=scale), 
