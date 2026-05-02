@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import os
+import threading
 from PIL import Image
 from glob import glob
 
@@ -56,6 +57,10 @@ class Stereo2Depth:
         self.model.to(self.device)
         self.model.eval()
         self.model = self.model.to(self.dtype)
+        self.val_transform = transforms.Compose([
+            transforms.Resize(scale_x=scale, scale_y=scale),
+            transforms.ToTensor(no_normalize=True),
+        ])
 
     def run(self, left_img, right_img):
         scale = self.scale
@@ -67,9 +72,6 @@ class Stereo2Depth:
 
 
         """Run MatchStereo/MatchFlow on stereo/flow pairs"""
-        val_transform_list = [transforms.Resize(scale_x=scale, scale_y=scale), 
-                              transforms.ToTensor(no_normalize=True)]
-        val_transform = transforms.Compose(val_transform_list)
 
         # if torch.cuda.is_available() and not args.no_compile and args.device_id >=0:
         #     print('compiling the model, this may take several minutes')
@@ -100,7 +102,7 @@ class Stereo2Depth:
         right = right_img #np.array(Image.open(right_names[i]).convert('RGB')).astype(np.float32)
 
         sample = {'left': left, 'right': right}
-        sample = val_transform(sample)
+        sample = self.val_transform(sample)
         left = sample['left'].to(self.device, dtype=self.dtype).unsqueeze(0) # [1, 3, H, W]
         right = sample['right'].to(self.device, dtype=self.dtype).unsqueeze(0) # [1, 3, H, W]
 
@@ -193,6 +195,63 @@ class Stereo2Depth:
         #             f.write(str(f"runtime {inference_time / 1000}"))
 
         print("Inference done.")
+
+
+class Stereo2DepthWorker:
+    """Run Stereo2Depth inference on a background thread.
+
+    The worker stores only the newest pending input and newest finished
+    disparity so the caller can continue capturing frames without blocking on
+    inference.
+    """
+
+    def __init__(self, stereo2depth):
+        self.stereo2depth = stereo2depth
+        self._job_condition = threading.Condition()
+        self._latest_job = None
+        self._closed = False
+        self._result_lock = threading.Lock()
+        self._latest_result = None
+        self._thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self._thread.start()
+
+    def submit(self, left_img, right_img):
+        with self._job_condition:
+            if self._closed:
+                raise RuntimeError("Stereo2DepthWorker has been closed")
+            self._latest_job = (
+                np.array(left_img, copy=True),
+                np.array(right_img, copy=True),
+            )
+            self._job_condition.notify()
+
+    def get_latest_result(self):
+        with self._result_lock:
+            latest = self._latest_result
+            self._latest_result = None
+            return latest
+
+    def close(self):
+        with self._job_condition:
+            self._closed = True
+            self._job_condition.notify()
+        self._thread.join()
+
+    def _worker_loop(self):
+        while True:
+            with self._job_condition:
+                while self._latest_job is None and not self._closed:
+                    self._job_condition.wait()
+
+                if self._closed:
+                    break
+
+                left_img, right_img = self._latest_job
+                self._latest_job = None
+
+            disparity = self.stereo2depth.run(left_img, right_img)
+            with self._result_lock:
+                self._latest_result = disparity
 
 def run(args):
     """Run MatchStereo/MatchFlow on stereo/flow pairs"""
